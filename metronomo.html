@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Metrónomo</title>
+<style>
+  :root {
+    --green: #2ecc71;
+    --yellow: #f1c40f;
+    --red: #e74c3c;
+    --bg: #121212;
+    --fg: #f5f5f5;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  #app {
+    width: 100%;
+    max-width: 360px;
+    text-align: center;
+  }
+  nav {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    margin-bottom: 24px;
+    font-size: 0.85rem;
+  }
+  nav a {
+    color: #777;
+    text-decoration: none;
+    padding: 4px 0;
+  }
+  nav a.active {
+    color: var(--fg);
+    border-bottom: 2px solid var(--green);
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: #999;
+    margin: 0 0 32px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  #beatDot {
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    background: #2a2a2a;
+    margin: 0 auto 12px;
+    transition: background 0.05s ease, transform 0.05s ease;
+  }
+  #beatDot.flash {
+    background: var(--green);
+    transform: scale(1.12);
+  }
+  #beatDot.flash.accent {
+    background: var(--yellow);
+  }
+  #beatLabel {
+    font-size: 1.1rem;
+    color: #aaa;
+    margin-bottom: 32px;
+    min-height: 1.4em;
+  }
+  .control {
+    margin-bottom: 20px;
+    text-align: left;
+  }
+  .control label {
+    display: block;
+    font-size: 0.8rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 6px;
+  }
+  .bpmRow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  #bpmRange { flex: 1; }
+  #bpmNumber {
+    width: 64px;
+    font-size: 1rem;
+    padding: 6px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background: #1a1a1a;
+    color: var(--fg);
+    text-align: center;
+  }
+  #beatsInput {
+    width: 64px;
+    font-size: 1rem;
+    padding: 6px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background: #1a1a1a;
+    color: var(--fg);
+    text-align: center;
+  }
+  #playBtn {
+    font-size: 1.2rem;
+    padding: 16px 32px;
+    border-radius: 12px;
+    border: none;
+    background: var(--green);
+    color: #062;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 8px;
+  }
+  #playBtn.playing { background: var(--red); color: #400; }
+  #playBtn:active { opacity: 0.8; }
+</style>
+</head>
+<body>
+  <div id="app">
+    <nav>
+      <a href="index.html">Afinador</a>
+      <a href="practica.html">Práctica</a>
+      <a href="metronomo.html" class="active">Metrónomo</a>
+    </nav>
+    <h1>Metrónomo</h1>
+
+    <div id="beatDot"></div>
+    <div id="beatLabel">—</div>
+
+    <div class="control">
+      <label for="bpmNumber">BPM</label>
+      <div class="bpmRow">
+        <input type="range" id="bpmRange" min="30" max="240" value="100">
+        <input type="number" id="bpmNumber" min="30" max="240" value="100">
+      </div>
+    </div>
+
+    <div class="control">
+      <label for="beatsInput">Pulsos por compás</label>
+      <input type="number" id="beatsInput" min="1" max="12" value="4">
+    </div>
+
+    <button id="playBtn">▶ Play</button>
+  </div>
+
+<script>
+const beatDot = document.getElementById('beatDot');
+const beatLabel = document.getElementById('beatLabel');
+const bpmRange = document.getElementById('bpmRange');
+const bpmNumber = document.getElementById('bpmNumber');
+const beatsInput = document.getElementById('beatsInput');
+const playBtn = document.getElementById('playBtn');
+
+let audioContext;
+let isRunning = false;
+let bpm = 100;
+let beatsPerBar = 4;
+let currentBeatInBar = 0;
+let nextNoteTime = 0.0;
+let notesInQueue = [];
+let lastNoteDrawn = -1;
+let timerID = null;
+
+const LOOKAHEAD_MS = 25;
+const SCHEDULE_AHEAD_S = 0.1;
+const CLICK_DURATION_S = 0.05;
+
+bpmRange.addEventListener('input', () => {
+  bpm = Number(bpmRange.value);
+  bpmNumber.value = bpm;
+});
+bpmNumber.addEventListener('input', () => {
+  bpm = Math.min(240, Math.max(30, Number(bpmNumber.value) || 100));
+  bpmRange.value = bpm;
+});
+beatsInput.addEventListener('input', () => {
+  beatsPerBar = Math.min(12, Math.max(1, Number(beatsInput.value) || 4));
+});
+
+playBtn.addEventListener('click', () => {
+  if (!audioContext) {
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  isRunning ? stopMetronome() : startMetronome();
+});
+
+function startMetronome() {
+  isRunning = true;
+  currentBeatInBar = 0;
+  nextNoteTime = audioContext.currentTime + 0.05;
+  notesInQueue = [];
+  lastNoteDrawn = -1;
+  playBtn.textContent = '■ Stop';
+  playBtn.classList.add('playing');
+  scheduler();
+  requestAnimationFrame(draw);
+}
+
+function stopMetronome() {
+  isRunning = false;
+  clearTimeout(timerID);
+  playBtn.textContent = '▶ Play';
+  playBtn.classList.remove('playing');
+  beatDot.classList.remove('flash', 'accent');
+  beatLabel.textContent = '—';
+}
+
+function scheduler() {
+  while (nextNoteTime < audioContext.currentTime + SCHEDULE_AHEAD_S) {
+    scheduleClick(currentBeatInBar, nextNoteTime);
+    nextNoteTime += 60.0 / bpm;
+    currentBeatInBar = (currentBeatInBar + 1) % beatsPerBar;
+  }
+  timerID = setTimeout(scheduler, LOOKAHEAD_MS);
+}
+
+function scheduleClick(beatNumber, time) {
+  const osc = audioContext.createOscillator();
+  const gain = audioContext.createGain();
+  osc.connect(gain);
+  gain.connect(audioContext.destination);
+
+  osc.frequency.value = beatNumber === 0 ? 1500 : 1000;
+  gain.gain.setValueAtTime(1, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + CLICK_DURATION_S);
+
+  osc.start(time);
+  osc.stop(time + CLICK_DURATION_S);
+
+  notesInQueue.push({ beatNumber, time });
+}
+
+function draw() {
+  let drawnBeat = lastNoteDrawn;
+  const currentTime = audioContext.currentTime;
+
+  while (notesInQueue.length && notesInQueue[0].time < currentTime) {
+    drawnBeat = notesInQueue[0].beatNumber;
+    notesInQueue.shift();
+  }
+
+  if (lastNoteDrawn !== drawnBeat) {
+    lastNoteDrawn = drawnBeat;
+    flashBeat(drawnBeat);
+  }
+
+  if (isRunning) requestAnimationFrame(draw);
+}
+
+function flashBeat(beatNumber) {
+  beatDot.classList.remove('flash', 'accent');
+  void beatDot.offsetWidth;
+  beatDot.classList.add('flash');
+  if (beatNumber === 0) beatDot.classList.add('accent');
+  beatLabel.textContent = (beatNumber + 1) + ' / ' + beatsPerBar;
+  setTimeout(() => beatDot.classList.remove('flash', 'accent'), 100);
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
+}
+</script>
+</body>
+</html>
