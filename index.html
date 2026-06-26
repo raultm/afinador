@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Afinador</title>
+<style>
+  :root {
+    --green: #2ecc71;
+    --yellow: #f1c40f;
+    --red: #e74c3c;
+    --bg: #121212;
+    --fg: #f5f5f5;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+  }
+  #app {
+    width: 100%;
+    max-width: 420px;
+    text-align: center;
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: #999;
+    margin: 0 0 24px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  #startBtn {
+    font-size: 1.2rem;
+    padding: 16px 32px;
+    border-radius: 12px;
+    border: none;
+    background: var(--green);
+    color: #062;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #startBtn:active { opacity: 0.8; }
+  #display[hidden], #startBtn[hidden] { display: none; }
+  #noteName {
+    font-size: 6rem;
+    font-weight: 700;
+    line-height: 1;
+    transition: color 0.15s ease;
+  }
+  #freq {
+    font-size: 1.1rem;
+    color: #aaa;
+    margin-top: 4px;
+    min-height: 1.4em;
+  }
+  #gauge {
+    position: relative;
+    width: 100%;
+    height: 12px;
+    background: #2a2a2a;
+    border-radius: 6px;
+    margin: 32px 0 8px;
+    overflow: hidden;
+  }
+  #centerMark {
+    position: absolute;
+    left: 50%;
+    top: -6px;
+    bottom: -6px;
+    width: 2px;
+    background: #555;
+    transform: translateX(-1px);
+  }
+  #needle {
+    position: absolute;
+    top: -8px;
+    bottom: -8px;
+    width: 4px;
+    border-radius: 2px;
+    background: var(--green);
+    left: 50%;
+    transform: translateX(-2px);
+    transition: left 0.08s linear, background 0.15s ease;
+  }
+  #labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    color: #777;
+  }
+  #centsLabel {
+    margin-top: 20px;
+    font-size: 1rem;
+    color: #ccc;
+    min-height: 1.4em;
+  }
+  #status {
+    margin-top: 24px;
+    font-size: 0.9rem;
+    color: #e67e22;
+    min-height: 1.4em;
+  }
+  nav {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    margin-bottom: 24px;
+    font-size: 0.85rem;
+  }
+  nav a {
+    color: #777;
+    text-decoration: none;
+    padding: 4px 0;
+  }
+  nav a.active {
+    color: var(--fg);
+    border-bottom: 2px solid var(--green);
+  }
+</style>
+</head>
+<body>
+  <div id="app">
+    <nav>
+      <a href="index.html" class="active">Afinador</a>
+      <a href="practica.html">Práctica</a>
+      <a href="metronomo.html">Metrónomo</a>
+    </nav>
+    <h1>Afinador</h1>
+    <button id="startBtn">Iniciar micrófono</button>
+    <div id="display" hidden>
+      <div id="noteName">—</div>
+      <div id="freq">&nbsp;</div>
+      <div id="gauge">
+        <div id="centerMark"></div>
+        <div id="needle"></div>
+      </div>
+      <div id="labels"><span>BAJA</span><span>ALTA</span></div>
+      <div id="centsLabel">&nbsp;</div>
+    </div>
+    <p id="status"></p>
+  </div>
+
+<script src="pitch.js"></script>
+<script>
+const startBtn = document.getElementById('startBtn');
+const display = document.getElementById('display');
+const noteNameEl = document.getElementById('noteName');
+const freqEl = document.getElementById('freq');
+const needleEl = document.getElementById('needle');
+const centsLabelEl = document.getElementById('centsLabel');
+const statusEl = document.getElementById('status');
+
+let audioContext, analyser;
+const buf = new Float32Array(2048);
+
+startBtn.addEventListener('click', start);
+
+async function start() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    startBtn.hidden = true;
+    display.hidden = false;
+    statusEl.textContent = '';
+    requestAnimationFrame(update);
+  } catch (err) {
+    statusEl.textContent = 'No se ha podido acceder al micrófono: ' + err.message;
+  }
+}
+
+let smoothedCents = 0;
+let displayedMidi = null;
+let candidateMidi = null;
+let candidateCount = 0;
+let silenceFrames = 0;
+const NOTE_CONFIRM_FRAMES = 4; // frames seguidos que debe repetirse una nota nueva antes de mostrarla
+const SMOOTHING_FACTOR = 0.2;  // 0-1, más bajo = aguja más estable pero más lenta
+const SILENCE_GRACE_FRAMES = 8; // tolera huecos breves (cambios de arco, respiraciones) sin parpadear
+
+function update() {
+  analyser.getFloatTimeDomainData(buf);
+  const pitch = autoCorrelate(buf, audioContext.sampleRate);
+
+  if (pitch > 0) {
+    silenceFrames = 0;
+    const midi = noteFromPitch(pitch);
+
+    if (displayedMidi === null) {
+      displayedMidi = midi;
+      smoothedCents = centsOffFromPitch(pitch, midi);
+    } else if (midi !== displayedMidi) {
+      if (midi === candidateMidi) {
+        candidateCount++;
+        if (candidateCount >= NOTE_CONFIRM_FRAMES) {
+          displayedMidi = midi;
+          smoothedCents = centsOffFromPitch(pitch, midi);
+          candidateCount = 0;
+        }
+      } else {
+        candidateMidi = midi;
+        candidateCount = 1;
+      }
+    } else {
+      candidateCount = 0;
+    }
+
+    const cents = centsOffFromPitch(pitch, displayedMidi);
+    smoothedCents += (cents - smoothedCents) * SMOOTHING_FACTOR;
+
+    renderNote(getNoteName(displayedMidi), pitch, Math.round(smoothedCents));
+  } else if (++silenceFrames > SILENCE_GRACE_FRAMES) {
+    displayedMidi = null;
+    candidateMidi = null;
+    candidateCount = 0;
+    renderSilence();
+  }
+
+  requestAnimationFrame(update);
+}
+
+function renderNote(name, freq, cents) {
+  noteNameEl.textContent = name;
+  freqEl.textContent = freq.toFixed(1) + ' Hz';
+
+  const clamped = Math.max(-50, Math.min(50, cents));
+  needleEl.style.left = (50 + clamped) + '%';
+
+  const abs = Math.abs(cents);
+  const color = abs <= 5 ? 'var(--green)' : abs <= 15 ? 'var(--yellow)' : 'var(--red)';
+  needleEl.style.background = color;
+  noteNameEl.style.color = color;
+
+  centsLabelEl.textContent = (cents > 0 ? '+' : '') + cents + ' cents';
+}
+
+function renderSilence() {
+  noteNameEl.textContent = '—';
+  noteNameEl.style.color = 'var(--fg)';
+  freqEl.innerHTML = '&nbsp;';
+  needleEl.style.left = '50%';
+  needleEl.style.background = '#555';
+  centsLabelEl.innerHTML = '&nbsp;';
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
+}
+</script>
+</body>
+</html>
