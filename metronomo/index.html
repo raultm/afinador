@@ -8,6 +8,9 @@
 <meta name="apple-mobile-web-app-title" content="Metrónomo">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="theme-color" content="#121212">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="manifest" href="manifest.json">
 <title>Metrónomo</title>
 <style>
   :root {
@@ -65,8 +68,8 @@
     min-height: 1.4em;
   }
   .control {
-    margin-bottom: 20px;
-    text-align: left;
+    margin-bottom: 24px;
+    text-align: center;
   }
   .control label {
     display: block;
@@ -74,34 +77,51 @@
     color: #888;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    margin-bottom: 6px;
+    margin-bottom: 10px;
   }
-  .bpmRow {
+  .stepper {
     display: flex;
     align-items: center;
-    gap: 12px;
+    justify-content: center;
+    gap: 10px;
   }
-  #bpmRange { flex: 1; }
-  #bpmNumber {
-    width: 64px;
+  .stepValue {
+    font-size: clamp(2.6rem, 16vw, 3.6rem);
+    font-weight: 700;
+    min-width: 90px;
+  }
+  .stepBtn {
     font-size: 1rem;
-    padding: 6px;
-    border-radius: 8px;
-    border: 1px solid #333;
+    font-weight: 600;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: none;
     background: #1a1a1a;
     color: var(--fg);
-    text-align: center;
+    cursor: pointer;
   }
-  #beatsInput {
-    width: 64px;
-    font-size: 1rem;
-    padding: 6px;
-    border-radius: 8px;
-    border: 1px solid #333;
+  .stepBtn:active { opacity: 0.8; }
+  .presets {
+    display: flex;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 12px;
+  }
+  .presetBtn {
+    font-size: 0.95rem;
+    font-weight: 600;
+    padding: 8px 18px;
+    border-radius: 999px;
+    border: none;
     background: #1a1a1a;
-    color: var(--fg);
-    text-align: center;
+    color: #aaa;
+    cursor: pointer;
   }
+  .presetBtn.active {
+    background: var(--green);
+    color: #062;
+  }
+  .presetBtn:active { opacity: 0.8; }
   #playBtn {
     font-size: 1.2rem;
     padding: 16px 32px;
@@ -125,16 +145,34 @@
     <div id="beatLabel">—</div>
 
     <div class="control">
-      <label for="bpmNumber">BPM</label>
-      <div class="bpmRow">
-        <input type="range" id="bpmRange" min="30" max="240" value="100">
-        <input type="number" id="bpmNumber" min="30" max="240" value="100">
+      <label>BPM</label>
+      <div class="stepper">
+        <button class="stepBtn" data-action="bpm" data-delta="-5">-5</button>
+        <button class="stepBtn" data-action="bpm" data-delta="-1">-1</button>
+        <div id="bpmValue" class="stepValue">100</div>
+        <button class="stepBtn" data-action="bpm" data-delta="1">+1</button>
+        <button class="stepBtn" data-action="bpm" data-delta="5">+5</button>
+      </div>
+      <div class="presets">
+        <button class="presetBtn" data-action="bpm" data-value="60">60</button>
+        <button class="presetBtn" data-action="bpm" data-value="90">90</button>
+        <button class="presetBtn" data-action="bpm" data-value="120">120</button>
       </div>
     </div>
 
     <div class="control">
-      <label for="beatsInput">Pulsos por compás</label>
-      <input type="number" id="beatsInput" min="1" max="12" value="4">
+      <label>Pulsos por compás</label>
+      <div class="stepper">
+        <button class="stepBtn" data-action="beats" data-delta="-1">-1</button>
+        <div id="beatsValue" class="stepValue">4</div>
+        <button class="stepBtn" data-action="beats" data-delta="1">+1</button>
+      </div>
+      <div class="presets">
+        <button class="presetBtn" data-action="beats" data-value="2">2</button>
+        <button class="presetBtn" data-action="beats" data-value="3">3</button>
+        <button class="presetBtn" data-action="beats" data-value="4">4</button>
+        <button class="presetBtn" data-action="beats" data-value="6">6</button>
+      </div>
     </div>
 
     <button id="playBtn">▶ Play</button>
@@ -143,9 +181,8 @@
 <script>
 const beatDot = document.getElementById('beatDot');
 const beatLabel = document.getElementById('beatLabel');
-const bpmRange = document.getElementById('bpmRange');
-const bpmNumber = document.getElementById('bpmNumber');
-const beatsInput = document.getElementById('beatsInput');
+const bpmValueEl = document.getElementById('bpmValue');
+const beatsValueEl = document.getElementById('beatsValue');
 const playBtn = document.getElementById('playBtn');
 
 let audioContext;
@@ -162,17 +199,40 @@ const LOOKAHEAD_MS = 25;
 const SCHEDULE_AHEAD_S = 0.1;
 const CLICK_DURATION_S = 0.05;
 
-bpmRange.addEventListener('input', () => {
-  bpm = Number(bpmRange.value);
-  bpmNumber.value = bpm;
+function setBpm(value) {
+  bpm = Math.min(240, Math.max(30, value));
+  bpmValueEl.textContent = bpm;
+  document.querySelectorAll('.presetBtn[data-action="bpm"]').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.value) === bpm);
+  });
+}
+
+function setBeatsPerBar(value) {
+  beatsPerBar = Math.min(12, Math.max(1, value));
+  beatsValueEl.textContent = beatsPerBar;
+  document.querySelectorAll('.presetBtn[data-action="beats"]').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.value) === beatsPerBar);
+  });
+}
+
+document.querySelectorAll('.stepBtn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const delta = Number(btn.dataset.delta);
+    if (btn.dataset.action === 'bpm') setBpm(bpm + delta);
+    else setBeatsPerBar(beatsPerBar + delta);
+  });
 });
-bpmNumber.addEventListener('input', () => {
-  bpm = Math.min(240, Math.max(30, Number(bpmNumber.value) || 100));
-  bpmRange.value = bpm;
+
+document.querySelectorAll('.presetBtn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const value = Number(btn.dataset.value);
+    if (btn.dataset.action === 'bpm') setBpm(value);
+    else setBeatsPerBar(value);
+  });
 });
-beatsInput.addEventListener('input', () => {
-  beatsPerBar = Math.min(12, Math.max(1, Number(beatsInput.value) || 4));
-});
+
+setBpm(bpm);
+setBeatsPerBar(beatsPerBar);
 
 playBtn.addEventListener('click', () => {
   if (!audioContext) {
