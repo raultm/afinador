@@ -13,10 +13,10 @@ function centsOffFromPitch(frequency, note) {
   return Math.round(1200 * Math.log2(frequency / frequencyFromNoteNumber(note)));
 }
 
-function getNoteName(midi) {
+function getNoteParts(midi) {
   const name = noteStrings[((midi % 12) + 12) % 12];
   const octave = Math.floor(midi / 12) - 1;
-  return name + octave;
+  return { name, octave };
 }
 
 // Autocorrelación con recorte de silencio y interpolación parabólica (técnica estándar ACF2+).

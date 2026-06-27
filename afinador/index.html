@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Afinador">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#121212">
+<title>Afinador</title>
+<style>
+  :root {
+    --green: #2ecc71;
+    --yellow: #f1c40f;
+    --red: #e74c3c;
+    --bg: #121212;
+    --fg: #f5f5f5;
+  }
+  * { box-sizing: border-box; }
+  html { margin: 0; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  #app {
+    width: 100%;
+    max-width: 420px;
+    text-align: center;
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 500;
+    color: #999;
+    margin: 0 0 24px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  #startBtn {
+    font-size: 1.2rem;
+    padding: 16px 32px;
+    border-radius: 12px;
+    border: none;
+    background: var(--green);
+    color: #062;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  #startBtn:active { opacity: 0.8; }
+  #display[hidden], #startBtn[hidden] { display: none; }
+  #noteName {
+    font-size: clamp(3.5rem, 18vw, 6rem);
+    font-weight: 700;
+    line-height: 1;
+  }
+  #noteLetter {
+    transition: color 0.15s ease;
+  }
+  #noteOctave {
+    font-size: 0.35em;
+    font-weight: 500;
+    vertical-align: super;
+    margin-left: 0.1em;
+    color: #888;
+  }
+  #freq {
+    font-size: 1.1rem;
+    color: #aaa;
+    margin-top: 4px;
+    min-height: 1.4em;
+  }
+  #gauge {
+    position: relative;
+    width: 100%;
+    height: 12px;
+    background: #2a2a2a;
+    border-radius: 6px;
+    margin: 32px 0 8px;
+    overflow: hidden;
+  }
+  #centerMark {
+    position: absolute;
+    left: 50%;
+    top: -6px;
+    bottom: -6px;
+    width: 2px;
+    background: #555;
+    transform: translateX(-1px);
+  }
+  #needle {
+    position: absolute;
+    top: -8px;
+    bottom: -8px;
+    width: 4px;
+    border-radius: 2px;
+    background: var(--green);
+    left: 50%;
+    transform: translateX(-2px);
+    transition: left 0.08s linear, background 0.15s ease;
+  }
+  #labels {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.85rem;
+    color: #777;
+  }
+  #centsLabel {
+    margin-top: 20px;
+    font-size: 1rem;
+    color: #ccc;
+    min-height: 1.4em;
+  }
+  #stopMicBtn {
+    margin-top: 28px;
+    font-size: 0.95rem;
+    padding: 10px 20px;
+    border-radius: 10px;
+    border: none;
+    background: #333;
+    color: var(--fg);
+    cursor: pointer;
+  }
+  #stopMicBtn:active { opacity: 0.8; }
+  #status {
+    margin-top: 24px;
+    font-size: 0.9rem;
+    color: #e67e22;
+    min-height: 1.4em;
+  }
+</style>
+</head>
+<body>
+  <div id="app">
+    <h1>Afinador</h1>
+    <button id="startBtn">Iniciar micrófono</button>
+    <div id="display" hidden>
+      <div id="noteName"><span id="noteLetter">—</span><span id="noteOctave"></span></div>
+      <div id="freq">&nbsp;</div>
+      <div id="gauge">
+        <div id="centerMark"></div>
+        <div id="needle"></div>
+      </div>
+      <div id="labels"><span>BAJA</span><span>ALTA</span></div>
+      <div id="centsLabel">&nbsp;</div>
+      <button id="stopMicBtn">■ Detener micrófono</button>
+    </div>
+    <p id="status"></p>
+  </div>
+
+<script src="pitch.js"></script>
+<script>
+const startBtn = document.getElementById('startBtn');
+const stopMicBtn = document.getElementById('stopMicBtn');
+const display = document.getElementById('display');
+const noteLetterEl = document.getElementById('noteLetter');
+const noteOctaveEl = document.getElementById('noteOctave');
+const freqEl = document.getElementById('freq');
+const needleEl = document.getElementById('needle');
+const centsLabelEl = document.getElementById('centsLabel');
+const statusEl = document.getElementById('status');
+
+let audioContext, analyser, stream;
+let running = false;
+const buf = new Float32Array(2048);
+
+startBtn.addEventListener('click', start);
+stopMicBtn.addEventListener('click', stopTuner);
+
+async function start() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 2048;
+    const source = audioContext.createMediaStreamSource(stream);
+    source.connect(analyser);
+    startBtn.hidden = true;
+    display.hidden = false;
+    statusEl.textContent = '';
+    running = true;
+    requestAnimationFrame(update);
+  } catch (err) {
+    statusEl.textContent = 'No se ha podido acceder al micrófono: ' + err.name + ' — ' + err.message;
+  }
+}
+
+function stopTuner() {
+  running = false;
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  if (audioContext) audioContext.close();
+  audioContext = null;
+  analyser = null;
+  stream = null;
+  displayedMidi = null;
+  candidateMidi = null;
+  candidateCount = 0;
+  silenceFrames = 0;
+  display.hidden = true;
+  startBtn.hidden = false;
+  statusEl.textContent = '';
+}
+
+let smoothedCents = 0;
+let displayedMidi = null;
+let candidateMidi = null;
+let candidateCount = 0;
+let silenceFrames = 0;
+const NOTE_CONFIRM_FRAMES = 4; // frames seguidos que debe repetirse una nota nueva antes de mostrarla
+const SMOOTHING_FACTOR = 0.2;  // 0-1, más bajo = aguja más estable pero más lenta
+const SILENCE_GRACE_FRAMES = 8; // tolera huecos breves (cambios de arco, respiraciones) sin parpadear
+
+function update() {
+  if (!running) return;
+
+  analyser.getFloatTimeDomainData(buf);
+  const pitch = autoCorrelate(buf, audioContext.sampleRate);
+
+  if (pitch > 0) {
+    silenceFrames = 0;
+    const midi = noteFromPitch(pitch);
+
+    if (displayedMidi === null) {
+      displayedMidi = midi;
+      smoothedCents = centsOffFromPitch(pitch, midi);
+    } else if (midi !== displayedMidi) {
+      if (midi === candidateMidi) {
+        candidateCount++;
+        if (candidateCount >= NOTE_CONFIRM_FRAMES) {
+          displayedMidi = midi;
+          smoothedCents = centsOffFromPitch(pitch, midi);
+          candidateCount = 0;
+        }
+      } else {
+        candidateMidi = midi;
+        candidateCount = 1;
+      }
+    } else {
+      candidateCount = 0;
+    }
+
+    const cents = centsOffFromPitch(pitch, displayedMidi);
+    smoothedCents += (cents - smoothedCents) * SMOOTHING_FACTOR;
+
+    renderNote(getNoteParts(displayedMidi), pitch, Math.round(smoothedCents));
+  } else if (++silenceFrames > SILENCE_GRACE_FRAMES) {
+    displayedMidi = null;
+    candidateMidi = null;
+    candidateCount = 0;
+    renderSilence();
+  }
+
+  requestAnimationFrame(update);
+}
+
+function renderNote(noteParts, freq, cents) {
+  noteLetterEl.textContent = noteParts.name;
+  noteOctaveEl.textContent = noteParts.octave;
+  freqEl.textContent = freq.toFixed(1) + ' Hz';
+
+  const clamped = Math.max(-50, Math.min(50, cents));
+  needleEl.style.left = (50 + clamped) + '%';
+
+  const abs = Math.abs(cents);
+  const color = abs <= 5 ? 'var(--green)' : abs <= 15 ? 'var(--yellow)' : 'var(--red)';
+  needleEl.style.background = color;
+  noteLetterEl.style.color = color;
+
+  centsLabelEl.textContent = (cents > 0 ? '+' : '') + cents + ' cents';
+}
+
+function renderSilence() {
+  noteLetterEl.textContent = '—';
+  noteLetterEl.style.color = 'var(--fg)';
+  noteOctaveEl.textContent = '';
+  freqEl.innerHTML = '&nbsp;';
+  needleEl.style.left = '50%';
+  needleEl.style.background = '#555';
+  centsLabelEl.innerHTML = '&nbsp;';
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js'));
+}
+</script>
+</body>
+</html>

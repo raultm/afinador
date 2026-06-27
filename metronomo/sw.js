@@ -1,9 +1,7 @@
-const CACHE_NAME = 'afinador-v1';
+const CACHE_NAME = 'metronomo-v1';
 const ASSETS = [
-  './index.html',
-  './practica.html',
-  './metronomo.html',
-  './pitch.js'
+  './',
+  './index.html'
 ];
 
 self.addEventListener('install', (event) => {
