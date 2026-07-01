@@ -314,6 +314,30 @@ function inferRhythm(durationMs, bpm) {
   return closest;
 }
 
+// Re-infiere figuras con el bpm actual y normaliza por contexto.
+// Se llama tras la grabación y cada vez que el usuario cambia el BPM.
+function recomputeRhythms() {
+  history.forEach((n) => { n.rhythm = inferRhythm(n.durationMs, bpm); });
+  applyContextNormalization();
+}
+
+// La figura más frecuente "atrae" las notas adyacentes dentro del ±40%
+// (corchea tocada un 15% larga → sigue siendo corchea si el contexto lo dice).
+function applyContextNormalization() {
+  if (history.length < 3) return;
+  const freq = {};
+  history.forEach((n) => { freq[n.rhythm.beats] = (freq[n.rhythm.beats] || 0) + 1; });
+  const domBeats  = Number(Object.entries(freq).sort((a, b) => b[1] - a[1])[0][0]);
+  const domRhythm = RHYTHM_VALUES.find((rv) => rv.beats === domBeats);
+  if (!domRhythm) return;
+  const tolerance = domBeats * 0.4;
+  const beatMs    = 60000 / bpm;
+  history.forEach((n) => {
+    if (n.rhythm.beats === domBeats) return;
+    if (Math.abs(n.durationMs / beatMs - domBeats) <= tolerance) n.rhythm = domRhythm;
+  });
+}
+
 function midiToAbcPitch(midi) {
   const idx = ((midi % 12) + 12) % 12;
   const octave = Math.floor(midi / 12) - 1;
@@ -335,7 +359,7 @@ function buildAbc(history, bpm) {
   let beatsSinceBar = 0;
   let sharpState = {};
 
-  history.forEach((n) => {
+  history.forEach((n, i) => {
     if (beatsSinceBar >= 4) {
       body += '| ';
       beatsSinceBar = 0;
@@ -347,8 +371,16 @@ function buildAbc(history, bpm) {
     if (isSharp && prev !== true) acc = '^';
     else if (!isSharp && prev === true) acc = '=';
     sharpState[letterOct] = isSharp;
-    body += acc + letterOct + n.rhythm.abc + ' ';
+
     beatsSinceBar += n.rhythm.beats;
+
+    // Agrupa corcheas/semicorcheas adyacentes (beam) salvo en frontera de tiempo
+    const next = history[i + 1];
+    const beam = n.rhythm.beats < 1
+      && next && next.rhythm.beats < 1
+      && !Number.isInteger(beatsSinceBar);
+
+    body += acc + letterOct + n.rhythm.abc + (beam ? '' : ' ');
   });
 
   body += '|]';
@@ -399,7 +431,7 @@ function setBpm(value) {
   bpm = Math.min(240, Math.max(30, Math.round(value)));
   bpmNumEl.textContent = bpm;
   bpmPresets.forEach((btn) => btn.classList.toggle('active', Number(btn.dataset.bpm) === bpm));
-  if (history.length) renderScore();
+  if (history.length) { recomputeRhythms(); renderScore(); renderTable(); }
 }
 
 document.querySelectorAll('.tempBtn').forEach((btn) => {
@@ -453,6 +485,7 @@ function stopPractice() {
 
   if (history.length >= 4) removeOutliers();
   mergeConsecutive();
+  recomputeRhythms();
 
   stopBtn.hidden  = true;
   liveEl.hidden   = true;
