@@ -363,10 +363,12 @@ let history = [];
 
 const NOTE_CONFIRM_FRAMES  = 4;
 const SILENCE_GRACE_FRAMES = 8;
-const MIN_NOTE_DURATION_MS = 80;
+const MIN_NOTE_DURATION_MS = 150; // < 150 ms se considera ruido/transitorio
+const SMOOTHING_FACTOR     = 0.2; // suavizado EMA para la visualización en vivo
 
 let displayedMidi = null, candidateMidi = null, candidateCount = 0;
 let silenceFrames = 0, noteStartTime = 0, centsSamples = [];
+let smoothedCents = 0;
 
 const buf = new Float32Array(2048);
 
@@ -484,7 +486,9 @@ function update() {
       candidateCount = 0;
       centsSamples.push(centsOffFromPitch(pitch, displayedMidi));
     }
-    renderLive(getNoteParts(displayedMidi), pitch, centsOffFromPitch(pitch, displayedMidi));
+    const rawCents = centsOffFromPitch(pitch, displayedMidi);
+    smoothedCents += (rawCents - smoothedCents) * SMOOTHING_FACTOR;
+    renderLive(getNoteParts(displayedMidi), pitch, Math.round(smoothedCents));
   } else if (++silenceFrames > SILENCE_GRACE_FRAMES) {
     closeCurrentNote();
     renderLiveSilence();
@@ -495,6 +499,7 @@ function update() {
 function beginNote(midi, pitch) {
   displayedMidi = midi; candidateMidi = null; candidateCount = 0;
   noteStartTime = performance.now();
+  smoothedCents = centsOffFromPitch(pitch, midi);
   centsSamples = [centsOffFromPitch(pitch, midi)];
 }
 
@@ -503,8 +508,16 @@ function closeCurrentNote() {
   const durationMs = performance.now() - noteStartTime;
   if (durationMs >= MIN_NOTE_DURATION_MS && centsSamples.length) {
     const avgCents = Math.round(centsSamples.reduce((a, b) => a + b, 0) / centsSamples.length);
-    const rhythm = inferRhythm(durationMs, bpm);
-    history.push({ midi: displayedMidi, durationMs, cents: avgCents, rhythm });
+    const last = history[history.length - 1];
+    if (last && last.midi === displayedMidi) {
+      // Misma nota interrumpida por ruido o silencio breve: fusionar
+      const total = last.durationMs + durationMs;
+      last.cents = Math.round((last.cents * last.durationMs + avgCents * durationMs) / total);
+      last.durationMs = total;
+      last.rhythm = inferRhythm(total, bpm);
+    } else {
+      history.push({ midi: displayedMidi, durationMs, cents: avgCents, rhythm: inferRhythm(durationMs, bpm) });
+    }
   }
   displayedMidi = null; candidateMidi = null; candidateCount = 0; centsSamples = [];
 }
