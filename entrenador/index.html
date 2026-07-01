@@ -362,6 +362,7 @@ let running = false;
 let history = [];
 
 const NOTE_CONFIRM_FRAMES  = 4;
+const JUMP_CONFIRM_FRAMES  = 8;  // saltos > octava: más frames para filtrar errores de autocorrelación
 const SILENCE_GRACE_FRAMES = 8;
 const MIN_NOTE_DURATION_MS = 150; // < 150 ms se considera ruido/transitorio
 const SMOOTHING_FACTOR     = 0.2; // suavizado EMA para la visualización en vivo
@@ -450,12 +451,24 @@ function stopPractice() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   if (audioContext) audioContext.close();
 
+  if (history.length >= 4) removeOutliers();
+
   stopBtn.hidden  = true;
   liveEl.hidden   = true;
   startBtn.hidden = true;
   detectBtn.hidden = !history.length;
   resultsWrapEl.hidden = false;
   renderResults();
+}
+
+function removeOutliers() {
+  const midis = history.map((n) => n.midi).sort((a, b) => a - b);
+  const q1 = midis[Math.floor(midis.length * 0.25)];
+  const q3 = midis[Math.floor(midis.length * 0.75)];
+  const iqr = q3 - q1;
+  const lo  = q1 - 1.5 * iqr;
+  const hi  = q3 + 1.5 * iqr;
+  history = history.filter((n) => n.midi >= lo && n.midi <= hi);
 }
 
 function resetPractice() {
@@ -480,7 +493,9 @@ function update() {
     } else if (midi !== displayedMidi) {
       if (midi === candidateMidi) {
         candidateCount++;
-        if (candidateCount >= NOTE_CONFIRM_FRAMES) { closeCurrentNote(); beginNote(midi, pitch); }
+        const required = Math.abs(midi - displayedMidi) > 12
+          ? JUMP_CONFIRM_FRAMES : NOTE_CONFIRM_FRAMES;
+        if (candidateCount >= required) { closeCurrentNote(); beginNote(midi, pitch); }
       } else { candidateMidi = midi; candidateCount = 1; }
     } else {
       candidateCount = 0;
