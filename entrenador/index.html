@@ -452,6 +452,7 @@ function stopPractice() {
   if (audioContext) audioContext.close();
 
   if (history.length >= 4) removeOutliers();
+  mergeConsecutive();
 
   stopBtn.hidden  = true;
   liveEl.hidden   = true;
@@ -469,6 +470,22 @@ function removeOutliers() {
   const lo  = q1 - 1.5 * iqr;
   const hi  = q3 + 1.5 * iqr;
   history = history.filter((n) => n.midi >= lo && n.midi <= hi);
+}
+
+function mergeConsecutive() {
+  const merged = [];
+  for (const n of history) {
+    const last = merged[merged.length - 1];
+    if (last && last.midi === n.midi) {
+      const total = last.durationMs + n.durationMs;
+      last.cents      = Math.round((last.cents * last.durationMs + n.cents * n.durationMs) / total);
+      last.durationMs = total;
+      last.rhythm     = inferRhythm(total, bpm);
+    } else {
+      merged.push({ ...n });
+    }
+  }
+  history = merged;
 }
 
 function resetPractice() {
