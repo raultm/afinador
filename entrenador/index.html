@@ -159,9 +159,10 @@
   /* Score */
   #scoreWrap {
     background: #fff;
+    color: #000; /* fuerza negro en SVG que usa currentColor */
     border-radius: 12px;
     padding: 12px 8px 4px;
-    margin-bottom: 24px;
+    margin-bottom: 16px;
     overflow-x: auto;
   }
   #scoreEmpty {
@@ -170,13 +171,37 @@
     padding: 24px 0;
   }
 
-  /* Table */
-  #historyWrap h2 {
-    font-size: 1rem;
-    color: #ccc;
-    text-align: left;
-    margin: 0 0 12px;
+  /* Details collapsibles */
+  details { margin-bottom: 16px; text-align: left; }
+  details summary {
+    font-size: 0.85rem;
+    color: #777;
+    cursor: pointer;
+    user-select: none;
+    padding: 6px 0;
+    list-style: none;
   }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before { content: '▶  '; font-size: 0.65rem; }
+  details[open] summary::before { content: '▼  '; font-size: 0.65rem; }
+
+  /* ABC textarea */
+  #abcText {
+    width: 100%;
+    min-height: 110px;
+    margin-top: 8px;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid #2a2a2a;
+    background: #1a1a1a;
+    color: var(--fg);
+    font-family: monospace;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    resize: vertical;
+  }
+
+  /* Table */
   .tableWrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
   th, td { padding: 7px 5px; text-align: center; border-bottom: 1px solid #2a2a2a; }
@@ -234,9 +259,15 @@
         <div id="paper"></div>
       </div>
 
+      <!-- ABC editable -->
+      <details id="abcDetails">
+        <summary>Notación ABC</summary>
+        <textarea id="abcText" spellcheck="false"></textarea>
+      </details>
+
       <!-- Tabla detalle -->
-      <div id="historyWrap">
-        <h2>Detalle</h2>
+      <details id="historyDetails">
+        <summary>Detalle de notas</summary>
         <div class="tableWrap">
           <table>
             <thead>
@@ -245,7 +276,7 @@
             <tbody id="historyBody"></tbody>
           </table>
         </div>
-      </div>
+      </details>
 
       <button id="resetBtn" class="mainBtn">Nueva grabación</button>
     </div>
@@ -356,6 +387,7 @@ const statDurationEl=document.getElementById('statDuration');
 const statAccuracyEl=document.getElementById('statAccuracy');
 const paperEl      = document.getElementById('paper');
 const scoreEmptyEl = document.getElementById('scoreEmpty');
+const abcTextEl    = document.getElementById('abcText');
 const historyBodyEl= document.getElementById('historyBody');
 const statusEl     = document.getElementById('status');
 
@@ -509,11 +541,20 @@ function renderResults() {
 
 function renderScore() {
   paperEl.innerHTML = '';
-  if (!history.length) { scoreEmptyEl.hidden = false; return; }
+  if (!history.length) { scoreEmptyEl.hidden = false; abcTextEl.value = ''; return; }
   scoreEmptyEl.hidden = true;
   const abcStr = buildAbc(history, bpm);
+  abcTextEl.value = abcStr;
   ABCJS.renderAbc('paper', abcStr, { responsive: 'resize' });
 }
+
+abcTextEl.addEventListener('input', () => {
+  const txt = abcTextEl.value.trim();
+  if (!txt) return;
+  paperEl.innerHTML = '';
+  scoreEmptyEl.hidden = true;
+  ABCJS.renderAbc('paper', abcTextEl.value, { responsive: 'resize' });
+});
 
 function renderTable() {
   historyBodyEl.innerHTML = '';
