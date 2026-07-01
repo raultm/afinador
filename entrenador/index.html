@@ -507,7 +507,13 @@ function closeCurrentNote() {
   if (displayedMidi === null) return;
   const durationMs = performance.now() - noteStartTime;
   if (durationMs >= MIN_NOTE_DURATION_MS && centsSamples.length) {
-    const avgCents = Math.round(centsSamples.reduce((a, b) => a + b, 0) / centsSamples.length);
+    // Mediana en vez de media: ignora los transitorios del ataque/caída que
+    // sesgan la media aunque la nota sea estable.
+    const sorted = [...centsSamples].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    const avgCents = sorted.length % 2 !== 0
+      ? sorted[mid]
+      : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
     const last = history[history.length - 1];
     if (last && last.midi === displayedMidi) {
       // Misma nota interrumpida por ruido o silencio breve: fusionar
