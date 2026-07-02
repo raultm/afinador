@@ -104,6 +104,38 @@
   #detectBtn:active { opacity: 0.7; }
   #detectBtn[hidden] { display: none; }
 
+  /* Demos / análisis de archivo */
+  #demoBlock { margin-bottom: 24px; }
+  .demoTitle {
+    font-size: 0.72rem;
+    color: #666;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 8px;
+  }
+  #demoSelect {
+    width: 100%;
+    padding: 9px 10px;
+    border-radius: 10px;
+    border: 1px solid #2a2a2a;
+    background: #1a1a1a;
+    color: var(--fg);
+    font-size: 0.9rem;
+    margin-bottom: 8px;
+  }
+  .demoRow { display: flex; gap: 8px; }
+  .demoActionBtn {
+    flex: 1;
+    font-size: 0.85rem;
+    padding: 9px 10px;
+    border-radius: 10px;
+    border: 1px solid #333;
+    background: transparent;
+    color: #aaa;
+    cursor: pointer;
+  }
+  .demoActionBtn:active { opacity: 0.7; }
+
   /* Controls */
   #controls { margin-bottom: 20px; }
   .mainBtn {
@@ -238,6 +270,17 @@
       <button id="stopBtn"  class="mainBtn" hidden>■ Parar</button>
     </div>
 
+    <!-- Demos y análisis de archivo -->
+    <div id="demoBlock">
+      <div class="demoTitle">Pruebas</div>
+      <select id="demoSelect"></select>
+      <div class="demoRow">
+        <button id="demoBtn" class="demoActionBtn">▶ Probar demo</button>
+        <button id="fileBtn" class="demoActionBtn">📂 Analizar audio…</button>
+      </div>
+      <input type="file" id="audioFile" accept="audio/*" hidden>
+    </div>
+
     <!-- Nota en vivo -->
     <div id="live" hidden>
       <div id="noteName"><span id="noteLetter">—</span><span id="noteOctave"></span></div>
@@ -295,11 +338,11 @@
 const RHYTHM_VALUES = [
   { beats: 0.25, abc: '/4',  label: 'Semicorchea',      penalty: 0.12 },
   { beats: 0.5,  abc: '/2',  label: 'Corchea',          penalty: 0 },
-  { beats: 0.75, abc: '3/4', label: 'Corchea puntillo', penalty: 0.25 },
+  { beats: 0.75, abc: '3/4', label: 'Corchea puntillo', penalty: 0.2 },
   { beats: 1,    abc: '',    label: 'Negra',            penalty: 0 },
-  { beats: 1.5,  abc: '3/2', label: 'Negra puntillo',   penalty: 0.25 },
+  { beats: 1.5,  abc: '3/2', label: 'Negra puntillo',   penalty: 0.2 },
   { beats: 2,    abc: '2',   label: 'Blanca',           penalty: 0 },
-  { beats: 3,    abc: '3',   label: 'Blanca puntillo',  penalty: 0.25 },
+  { beats: 3,    abc: '3',   label: 'Blanca puntillo',  penalty: 0.2 },
   { beats: 4,    abc: '4',   label: 'Redonda',          penalty: 0.1 },
 ];
 
@@ -308,10 +351,13 @@ const ABC_BASE = ['C','^C','D','^D','E','F','^F','G','^G','A','^A','B'];
 
 // Cuantiza en espacio logarítmico (ratios, no diferencias absolutas: la
 // distancia absoluta sesga hacia las figuras largas) + penalización de complejidad.
-function quantizeBeats(beats) {
+// `dottedExtra`: penalización adicional a los puntillos para notas cuya
+// duración es poco fiable (p.ej. la última de la toma).
+function quantizeBeats(beats, dottedExtra = 0) {
   let best = RHYTHM_VALUES[0], bestCost = Infinity;
   for (const rv of RHYTHM_VALUES) {
-    const cost = Math.abs(Math.log2(beats / rv.beats)) + rv.penalty;
+    const dotted = rv.beats === 0.75 || rv.beats === 1.5 || rv.beats === 3;
+    const cost = Math.abs(Math.log2(beats / rv.beats)) + rv.penalty + (dotted ? dottedExtra : 0);
     if (cost < bestCost) { bestCost = cost; best = rv; }
   }
   return best;
@@ -334,44 +380,80 @@ function effectiveDurationMs(i) {
   return (gap < ioi * 0.35) ? ioi : n.durationMs;
 }
 
-// Re-infiere figuras con el bpm actual y normaliza por contexto.
-// Se llama tras la grabación y cada vez que el usuario cambia el BPM.
-function recomputeRhythms() {
-  history.forEach((n, i) => {
-    n.effMs  = effectiveDurationMs(i);
-    n.rhythm = quantizeBeats(n.effMs / (60000 / bpm));
-  });
-  applyContextNormalization();
+// Duraciones efectivas de toda la toma. La última nota no tiene "siguiente"
+// (no hay IOI), así que su duración sonada se compensa con el factor de
+// articulación mediano del resto: si el músico toca staccato al 70%, la
+// última nota también estará al ~70% de su valor real.
+function effectiveDurations() {
+  const out = history.map((_, i) => effectiveDurationMs(i));
+  if (history.length >= 3) {
+    const ratios = [];
+    for (let i = 0; i < history.length - 1; i++) {
+      const ioi = history[i + 1].startTime - history[i].startTime;
+      if (ioi > 0) ratios.push(Math.min(1, history[i].durationMs / ioi));
+    }
+    ratios.sort((a, b) => a - b);
+    const f = ratios[Math.floor(ratios.length / 2)];
+    if (f > 0.3) out[out.length - 1] = history[history.length - 1].durationMs / f;
+  }
+  return out;
 }
 
-// La figura más frecuente "atrae" las figuras vecinas dentro del ±30%
-// (corchea tocada un 15% larga → sigue siendo corchea si el contexto lo dice).
-function applyContextNormalization() {
-  if (history.length < 3) return;
-  const freq = {};
-  history.forEach((n) => { freq[n.rhythm.beats] = (freq[n.rhythm.beats] || 0) + 1; });
-  const domBeats  = Number(Object.entries(freq).sort((a, b) => b[1] - a[1])[0][0]);
-  const domRhythm = RHYTHM_VALUES.find((rv) => rv.beats === domBeats);
-  if (!domRhythm) return;
-  const beatMs = 60000 / bpm;
-  history.forEach((n) => {
-    if (n.rhythm.beats === domBeats) return;
-    // Solo atrae figuras contiguas (p.ej. puntillo ↔ simple), no saltos grandes
-    const ratio = Math.max(n.rhythm.beats, domBeats) / Math.min(n.rhythm.beats, domBeats);
-    if (ratio > 1.6) return;
-    if (Math.abs(n.effMs / beatMs - domBeats) <= domBeats * 0.3) n.rhythm = domRhythm;
+// Re-infiere figuras con el bpm actual.
+// Se llama tras la grabación y cada vez que el usuario cambia el BPM.
+// (La antigua "normalización por contexto" se eliminó: con la cuantización
+// log + penalización hacía más mal que bien — absorbía los puntillos reales.)
+function recomputeRhythms() {
+  const durs = effectiveDurations();
+  history.forEach((n, i) => {
+    n.effMs  = durs[i];
+    const isLast = i === history.length - 1;
+    n.rhythm = quantizeBeats(n.effMs / (60000 / bpm), isLast ? 0.15 : 0);
   });
+  applyPairCompletion();
+}
+
+// Corrección por parejas: si dos notas adyacentes suman ~un valor simple
+// (medio beat, un beat, dos beats) pero sus figuras cuantizadas no lo suman,
+// se re-reparte la pareja. Caso típico: "corchea puntillo + semicorchea"
+// tocada de forma imperfecta sale como "negra + semicorchea" (suma 1.25)
+// aunque los ataques digan claramente que ocupan un solo beat.
+function applyPairCompletion() {
+  const beatMs = 60000 / bpm;
+  // La última pareja se excluye: la duración de la nota final es poco fiable
+  // (no tiene IOI) y contaminaría la suma.
+  for (let i = 0; i < history.length - 2; i++) {
+    const a = history[i], b = history[i + 1];
+    const sumBeats = (a.effMs + b.effMs) / beatMs;
+    const target = [0.5, 1, 2].find((t) => Math.abs(Math.log2(sumBeats / t)) < 0.12);
+    if (!target || a.rhythm.beats + b.rhythm.beats === target) continue;
+    let best = null, bestCost = Infinity;
+    for (const ra of RHYTHM_VALUES) {
+      for (const rb of RHYTHM_VALUES) {
+        if (ra.beats + rb.beats !== target) continue;
+        const cost = Math.abs(Math.log2(a.effMs / beatMs / ra.beats)) + ra.penalty
+                   + Math.abs(Math.log2(b.effMs / beatMs / rb.beats)) + rb.penalty;
+        if (cost < bestCost) { bestCost = cost; best = [ra, rb]; }
+      }
+    }
+    // La pareja que completa el valor simple gana con ventaja de 0.15:
+    // solo se corrige si la alternativa es razonablemente cercana.
+    const curCost = Math.abs(Math.log2(a.effMs / beatMs / a.rhythm.beats)) + a.rhythm.penalty
+                  + Math.abs(Math.log2(b.effMs / beatMs / b.rhythm.beats)) + b.rhythm.penalty
+                  + 0.15;
+    if (best && bestCost < curCost) { a.rhythm = best[0]; b.rhythm = best[1]; i++; }
+  }
 }
 
 // Estimación de tempo por búsqueda de rejilla: elige el BPM que minimiza el
 // error medio de cuantización de todas las duraciones efectivas. Mucho más
-// robusto que "la nota más corta es una corchea". Los dos priors suaves
-// resuelven la ambigüedad de octava (60 vs 120 bpm dan el mismo error de
-// cuantización): se prefiere el tempo donde la figura mediana es una negra,
-// y ligeramente los tempos medios.
+// robusto que "la nota más corta es una corchea". La ambigüedad de octava
+// (60 vs 120 bpm) la rompen las propias penalizaciones de figuras: el tempo
+// doblado necesita blancas puntillo/redondas donde el correcto usa figuras
+// simples. El prior suave hacia tempos medios solo desempata casos exactos.
 function estimateTempo() {
   if (history.length < 3) return bpm;
-  const durs = history.map((_, i) => effectiveDurationMs(i));
+  const durs = effectiveDurations();
   let bestBpm = bpm, bestErr = Infinity;
   for (let cand = 40; cand <= 200; cand++) {
     const beatMs = 60000 / cand;
@@ -381,13 +463,22 @@ function estimateTempo() {
       const q = quantizeBeats(beats);
       err += Math.abs(Math.log2(beats / q.beats)) + q.penalty;
     }
-    err /= durs.length;
-    const qb = durs.map((d) => quantizeBeats(d / beatMs).beats).sort((a, b) => a - b);
-    const medBeats = qb[Math.floor(qb.length / 2)];
-    err += Math.abs(Math.log2(medBeats)) * 0.05 + Math.abs(Math.log2(cand / 100)) * 0.02;
+    err = err / durs.length + Math.abs(Math.log2(cand / 100)) * 0.015;
     if (err < bestErr) { bestErr = err; bestBpm = cand; }
   }
-  return bestBpm;
+  // Refinado: ajusta el beat con el residuo MEDIANO respecto a las figuras
+  // cuantizadas y re-cuantiza. Baja el error de BPM del ±4% de la rejilla
+  // entera a <2%. Mediana y no media: una nota mal cuantizada deja un residuo
+  // enorme que con la media arrastraría el tempo justo en la dirección errónea.
+  let beatMs = 60000 / bestBpm;
+  for (let it = 0; it < 3; it++) {
+    const res = durs.map((d) => {
+      const q = quantizeBeats(d / beatMs);
+      return Math.log2(d / (q.beats * beatMs));
+    }).sort((a, b) => a - b);
+    beatMs *= Math.pow(2, res[Math.floor(res.length / 2)]);
+  }
+  return Math.min(240, Math.max(30, Math.round(60000 / beatMs)));
 }
 
 function midiToAbcPitch(midi) {
@@ -449,15 +540,17 @@ let history = [];
 // según dispositivo, y con frames los umbrales cambiaban de móvil a móvil.
 const NOTE_CONFIRM_MS      = 60;  // cambio de nota: debe sostenerse 60 ms
 const JUMP_CONFIRM_MS      = 130; // saltos > octava: típicos errores de autocorrelación
-const SILENCE_GRACE_MS     = 120; // silencio sostenido antes de cerrar la nota
-const MIN_NOTE_DURATION_MS = 100; // < 100 ms se considera ruido/transitorio
+const SILENCE_GRACE_MS     = 60;  // silencio sostenido antes de cerrar la nota
+const MIN_NOTE_DURATION_MS = 80;  // < 80 ms se considera ruido/transitorio
 const ATTACK_SKIP_MS       = 60;  // el ataque sesga la afinación: se ignora al medir
-const REJOIN_GAP_MS        = 100; // misma nota separada por hueco < 100 ms → microcorte, fusionar
+const REJOIN_GAP_MS        = 50;  // misma nota separada por hueco < 50 ms → microcorte, fusionar
 const SMOOTHING_FACTOR     = 0.2; // suavizado EMA para la visualización en vivo
 
 let displayedMidi = null, candidateMidi = null, candidateSince = 0;
 let lastVoiceTime = 0, noteStartTime = 0, pitchSamples = [];
 let smoothedCents = 0;
+// Detección de re-ataque por energía (notas repetidas sin silencio apreciable)
+let notePeakRms = 0, energyDip = false, dipTime = 0, dipMinRms = 0;
 
 const buf = new Float32Array(2048);
 
@@ -481,6 +574,11 @@ const scoreEmptyEl = document.getElementById('scoreEmpty');
 const abcTextEl    = document.getElementById('abcText');
 const historyBodyEl= document.getElementById('historyBody');
 const statusEl     = document.getElementById('status');
+const demoBlockEl  = document.getElementById('demoBlock');
+const demoSelect   = document.getElementById('demoSelect');
+const demoBtn      = document.getElementById('demoBtn');
+const fileBtn      = document.getElementById('fileBtn');
+const audioFileEl  = document.getElementById('audioFile');
 
 // ── Tempo ────────────────────────────────────────────────────────────────────
 function setBpm(value) {
@@ -514,11 +612,11 @@ async function startPractice() {
     analyser.fftSize = 2048;
     audioContext.createMediaStreamSource(stream).connect(analyser);
 
-    history = [];
-    displayedMidi = null; candidateMidi = null; candidateSince = 0;
-    lastVoiceTime = performance.now(); pitchSamples = [];
+    resetDetectionState();
+    lastVoiceTime = performance.now();
 
     startBtn.hidden = true;
+    demoBlockEl.hidden = true;
     stopBtn.hidden  = false;
     liveEl.hidden   = false;
     resultsWrapEl.hidden = true;
@@ -537,14 +635,25 @@ function stopPractice() {
   if (stream) stream.getTracks().forEach((t) => t.stop());
   if (audioContext) audioContext.close();
 
-  if (history.length >= 4) removeOutliers();
-  mergeConsecutive();
-  if (history.length >= 3) bpm = estimateTempo(); // tempo automático sobre lo grabado
-  setBpm(bpm); // refresca UI y recalcula figuras con el tempo estimado
-
   stopBtn.hidden  = true;
   liveEl.hidden   = true;
   startBtn.hidden = true;
+  demoBlockEl.hidden = false;
+  finishAnalysis();
+}
+
+function resetDetectionState() {
+  history = [];
+  displayedMidi = null; candidateMidi = null; candidateSince = 0;
+  pitchSamples = []; lastVoiceTime = 0;
+}
+
+// Post-proceso común a grabación en vivo, demos y archivos de audio
+function finishAnalysis() {
+  if (history.length >= 4) removeOutliers();
+  mergeConsecutive();
+  if (history.length >= 3) bpm = estimateTempo(); // tempo automático sobre lo analizado
+  setBpm(bpm); // refresca UI y recalcula figuras con el tempo estimado
   detectBtn.hidden = !history.length;
   resultsWrapEl.hidden = false;
   renderResults();
@@ -565,8 +674,10 @@ function mergeConsecutive() {
   for (const n of history) {
     const last = merged[merged.length - 1];
     // Solo fusiona si el hueco es un microcorte: dos notas repetidas de verdad
-    // (staccato, mismo tono dos veces) deben quedarse como dos notas.
-    if (last && last.midi === n.midi && n.startTime - last.endTime < REJOIN_GAP_MS) {
+    // (staccato, mismo tono dos veces, o ataque detectado por energía)
+    // deben quedarse como dos notas.
+    if (last && !last.keepSeparate && last.midi === n.midi
+        && n.startTime - last.endTime < REJOIN_GAP_MS) {
       const total = last.durationMs + n.durationMs;
       last.cents      = Math.round((last.cents * last.durationMs + n.cents * n.durationMs) / total);
       last.durationMs = total;
@@ -584,21 +695,163 @@ function resetPractice() {
   detectBtn.hidden = true;
   resultsWrapEl.hidden = true;
   startBtn.hidden = false;
+  demoBlockEl.hidden = false;
   statusEl.textContent = '';
 }
 
-// ── Bucle de detección ───────────────────────────────────────────────────────
-function update() {
-  if (!running) return;
-  analyser.getFloatTimeDomainData(buf);
-  const pitch = autoCorrelate(buf, audioContext.sampleRate);
-  const now = performance.now();
+// ── Demos y análisis de archivo ──────────────────────────────────────────────
+// Cada demo se SINTETIZA como audio real y pasa por el pipeline completo
+// (autocorrelación incluida), así prueba lo mismo que una grabación de verdad.
+// `gap` = fracción del intervalo entre notas que queda en silencio (articulación).
+const DEMOS = [
+  {
+    name: 'Escala Do mayor · negras · 90 bpm',
+    bpm: 90, gap: 0.1,
+    notes: [[60,1],[62,1],[64,1],[65,1],[67,1],[69,1],[71,1],[72,2]],
+  },
+  {
+    name: 'Cumpleaños feliz · puntillos · 100 bpm',
+    bpm: 100, gap: 0.12,
+    notes: [[67,0.75],[67,0.25],[69,1],[67,1],[72,1],[71,2],
+            [67,0.75],[67,0.25],[69,1],[67,1],[74,1],[72,2]],
+  },
+  {
+    name: 'Notas repetidas · staccato · 90 bpm',
+    bpm: 90, gap: 0.3,
+    notes: [[67,0.5],[67,0.5],[67,0.5],[67,0.5],[69,0.5],[69,0.5],[69,0.5],[69,0.5],
+            [67,1],[67,1],[65,2]],
+  },
+  {
+    name: 'Ritmo mixto · 75 bpm',
+    bpm: 75, gap: 0.1,
+    notes: [[60,1],[62,0.5],[64,0.5],[65,1.5],[67,0.5],[69,1],[67,1],
+            [65,0.5],[64,0.5],[62,0.5],[60,0.5],[60,2]],
+  },
+];
 
+DEMOS.forEach((d, i) => {
+  const opt = document.createElement('option');
+  opt.value = i;
+  opt.textContent = d.name;
+  demoSelect.appendChild(opt);
+});
+
+// Sintetiza la demo con humanización: ±6% de timing y ±8 cents de afinación
+// por nota, para que el test se parezca a un músico y no a un secuenciador.
+async function synthesizeDemo(demo) {
+  const sr = 44100;
+  const beatS = 60 / demo.bpm;
+  const totalS = demo.notes.reduce((s, n) => s + n[1], 0) * beatS + 1;
+  const ctx = new OfflineAudioContext(1, Math.ceil(totalS * sr), sr);
+  // Timbre con armónicos (más realista que una senoide pura para la autocorrelación)
+  const wave = ctx.createPeriodicWave(
+    new Float32Array([0, 0, 0, 0, 0]),
+    new Float32Array([0, 1, 0.4, 0.2, 0.08]),
+  );
+  let t = 0.2;
+  for (const [midi, beats] of demo.notes) {
+    const ioi = beats * beatS * (0.94 + Math.random() * 0.12);
+    // Articulación: mínimo 60 ms de separación (como el tonguing real)
+    const silenceS = Math.max(0.06, ioi * demo.gap);
+    const soundS = Math.max(0.05, ioi - silenceS);
+    const osc = ctx.createOscillator();
+    osc.setPeriodicWave(wave);
+    osc.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
+    osc.detune.value = Math.random() * 16 - 8;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.5, t + 0.015);
+    g.gain.setValueAtTime(0.5, t + Math.max(0.02, soundS - 0.04));
+    g.gain.linearRampToValueAtTime(0, t + soundS);
+    osc.connect(g).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + soundS + 0.01);
+    t += ioi;
+  }
+  return ctx.startRendering();
+}
+
+// Pasa un AudioBuffer (demo sintetizada o archivo del usuario) por el mismo
+// pipeline que la grabación en vivo, con tiempos derivados de las muestras.
+async function analyzeAudioBuffer(audioBuf) {
+  const sr = audioBuf.sampleRate;
+  const len = Math.min(audioBuf.length, sr * 90); // límite 90 s
+  const data = new Float32Array(len);
+  for (let ch = 0; ch < audioBuf.numberOfChannels; ch++) {
+    const d = audioBuf.getChannelData(ch);
+    for (let i = 0; i < len; i++) data[i] += d[i] / audioBuf.numberOfChannels;
+  }
+  let peak = 0;
+  for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(data[i]));
+  if (peak > 0.001) { const k = 0.9 / peak; for (let i = 0; i < len; i++) data[i] *= k; }
+
+  statusEl.textContent = 'Analizando…';
+  resetDetectionState();
+  const win = new Float32Array(2048);
+  const hop = Math.round(sr * 0.016); // ~16 ms, como un frame a 60 fps
+  let frame = 0;
+  for (let pos = 0; pos + 2048 <= len; pos += hop, frame++) {
+    win.set(data.subarray(pos, pos + 2048));
+    processFrame(autoCorrelate(win, sr), rmsOf(win), (pos / sr) * 1000);
+    if (frame % 120 === 0) await new Promise((r) => setTimeout(r)); // no bloquear la UI
+  }
+  closeCurrentNote(lastVoiceTime || (len / sr) * 1000);
+
+  statusEl.textContent = '';
+  startBtn.hidden = true;
+  liveEl.hidden = true;
+  finishAnalysis();
+}
+
+demoBtn.addEventListener('click', async () => {
+  const demo = DEMOS[Number(demoSelect.value)];
+  if (!demo) return;
+  try {
+    statusEl.textContent = 'Generando demo…';
+    demoBtn.disabled = true;
+    await analyzeAudioBuffer(await synthesizeDemo(demo));
+  } catch (err) {
+    statusEl.textContent = 'Error en la demo: ' + err.message;
+  } finally {
+    demoBtn.disabled = false;
+  }
+});
+
+fileBtn.addEventListener('click', () => audioFileEl.click());
+audioFileEl.addEventListener('change', async () => {
+  const file = audioFileEl.files[0];
+  if (!file) return;
+  try {
+    statusEl.textContent = 'Decodificando audio…';
+    fileBtn.disabled = true;
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const audioBuf = await ac.decodeAudioData(await file.arrayBuffer());
+    ac.close();
+    await analyzeAudioBuffer(audioBuf);
+  } catch (err) {
+    statusEl.textContent = 'No se ha podido analizar el audio: ' + err.message;
+  } finally {
+    fileBtn.disabled = false;
+    audioFileEl.value = '';
+  }
+});
+
+// ── Bucle de detección ───────────────────────────────────────────────────────
+function rmsOf(b) {
+  let s = 0;
+  for (let i = 0; i < b.length; i++) s += b[i] * b[i];
+  return Math.sqrt(s / b.length);
+}
+
+// Máquina de estados nota a nota, independiente de la fuente de audio:
+// la usan tanto el micrófono en vivo como el análisis offline de demos/archivos.
+// Devuelve true si hay sonido con pitch detectado.
+function processFrame(pitch, rms, now) {
   if (pitch > 0) {
     lastVoiceTime = now;
     const midi = noteFromPitch(pitch);
     if (displayedMidi === null) {
-      beginNote(midi, pitch, now);
+      beginNote(midi, pitch, now, rms);
     } else if (midi !== displayedMidi) {
       if (midi === candidateMidi) {
         const requiredMs = Math.abs(midi - displayedMidi) > 12
@@ -606,7 +859,7 @@ function update() {
         if (now - candidateSince >= requiredMs) {
           // La nueva nota empezó realmente cuando apareció el candidato
           closeCurrentNote(candidateSince);
-          beginNote(midi, pitch, candidateSince);
+          beginNote(midi, pitch, candidateSince, rms);
         }
       } else { candidateMidi = midi; candidateSince = now; }
     } else {
@@ -615,26 +868,54 @@ function update() {
       // de estas muestras decide la nota final, robusta frente a la
       // variabilidad frame a frame.
       pitchSamples.push({ t: now, m: 12 * Math.log2(pitch / 440) + 69 });
+
+      // Re-ataque por energía: la misma nota tocada otra vez casi ligada no
+      // pasa por silencio, pero sí deja una caída profunda de energía seguida
+      // de una subida rápida. Sin esto, dos negras repetidas = una blanca.
+      if (rms > notePeakRms) notePeakRms = rms;
+      if (!energyDip) {
+        if (rms < notePeakRms * 0.3) { energyDip = true; dipTime = now; dipMinRms = rms; }
+      } else if (rms < dipMinRms) {
+        dipMinRms = rms;
+      } else if (rms > dipMinRms * 2.5 && rms > notePeakRms * 0.4) {
+        closeCurrentNote(dipTime, true); // true: no re-fusionar, es un ataque real
+        beginNote(midi, pitch, now, rms);
+      }
     }
+    return true;
+  }
+  if (now - lastVoiceTime > SILENCE_GRACE_MS) {
+    // La nota terminó cuando dejó de sonar, no tras el periodo de gracia
+    closeCurrentNote(lastVoiceTime);
+  }
+  return false;
+}
+
+function update() {
+  if (!running) return;
+  analyser.getFloatTimeDomainData(buf);
+  const pitch = autoCorrelate(buf, audioContext.sampleRate);
+  const now = performance.now();
+
+  if (processFrame(pitch, rmsOf(buf), now)) {
     const rawCents = centsOffFromPitch(pitch, displayedMidi);
     smoothedCents += (rawCents - smoothedCents) * SMOOTHING_FACTOR;
     renderLive(getNoteParts(displayedMidi), pitch, Math.round(smoothedCents));
-  } else if (now - lastVoiceTime > SILENCE_GRACE_MS) {
-    // La nota terminó cuando dejó de sonar, no tras el periodo de gracia
-    closeCurrentNote(lastVoiceTime);
+  } else if (displayedMidi === null) {
     renderLiveSilence();
   }
   requestAnimationFrame(update);
 }
 
-function beginNote(midi, pitch, now) {
+function beginNote(midi, pitch, now, rms = 0) {
   displayedMidi = midi; candidateMidi = null;
   noteStartTime = now;
   smoothedCents = centsOffFromPitch(pitch, midi);
   pitchSamples = [{ t: now, m: 12 * Math.log2(pitch / 440) + 69 }];
+  notePeakRms = rms; energyDip = false; dipMinRms = 0;
 }
 
-function closeCurrentNote(endTime = performance.now()) {
+function closeCurrentNote(endTime = performance.now(), isRealOnsetSplit = false) {
   if (displayedMidi === null) return;
   const durationMs = endTime - noteStartTime;
   if (durationMs >= MIN_NOTE_DURATION_MS && pitchSamples.length) {
@@ -652,7 +933,8 @@ function closeCurrentNote(endTime = performance.now()) {
     const cents = Math.round((medianMidi - midi) * 100);
 
     const last = history[history.length - 1];
-    if (last && last.midi === midi && noteStartTime - last.endTime < REJOIN_GAP_MS) {
+    if (last && !last.keepSeparate && last.midi === midi
+        && noteStartTime - last.endTime < REJOIN_GAP_MS) {
       // Misma nota interrumpida por un microcorte: fusionar
       const total = last.durationMs + durationMs;
       last.cents = Math.round((last.cents * last.durationMs + cents * durationMs) / total);
@@ -663,9 +945,11 @@ function closeCurrentNote(endTime = performance.now()) {
       history.push({
         midi, cents, durationMs,
         startTime: noteStartTime, endTime,
+        keepSeparate: isRealOnsetSplit, // ataque real detectado: nunca re-fusionar
         rhythm: inferRhythm(durationMs, bpm),
       });
     }
+    if (isRealOnsetSplit && history.length) history[history.length - 1].keepSeparate = true;
   }
   displayedMidi = null; candidateMidi = null; pitchSamples = [];
 }
