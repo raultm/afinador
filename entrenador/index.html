@@ -229,7 +229,7 @@
         <button class="bpmPreset" data-bpm="90">90</button>
         <button class="bpmPreset" data-bpm="120">120</button>
       </div>
-      <button id="detectBtn" hidden>↺ Detectar tempo (aprox.)</button>
+      <button id="detectBtn" hidden>↺ Re-detectar tempo</button>
     </div>
 
     <!-- Botones play/stop -->
@@ -288,40 +288,63 @@
 <script src="abcjs-basic-min.js"></script>
 <script>
 // ── Constantes de figuras rítmicas ──────────────────────────────────────────
+// `penalty` es un coste de complejidad (en unidades log2) que se suma a la
+// distancia al cuantizar: una figura con puntillo solo gana si encaja
+// claramente mejor que la figura simple vecina. Evita el vaivén
+// corchea ↔ corchea con puntillo con duraciones ambiguas.
 const RHYTHM_VALUES = [
-  { beats: 0.25, abc: '/4',  label: 'Semicorchea' },
-  { beats: 0.5,  abc: '/2',  label: 'Corchea' },
-  { beats: 0.75, abc: '3/4', label: 'Corchea puntillo' },
-  { beats: 1,    abc: '',    label: 'Negra' },
-  { beats: 1.5,  abc: '3/2', label: 'Negra puntillo' },
-  { beats: 2,    abc: '2',   label: 'Blanca' },
-  { beats: 3,    abc: '3',   label: 'Blanca puntillo' },
-  { beats: 4,    abc: '4',   label: 'Redonda' },
+  { beats: 0.25, abc: '/4',  label: 'Semicorchea',      penalty: 0.12 },
+  { beats: 0.5,  abc: '/2',  label: 'Corchea',          penalty: 0 },
+  { beats: 0.75, abc: '3/4', label: 'Corchea puntillo', penalty: 0.25 },
+  { beats: 1,    abc: '',    label: 'Negra',            penalty: 0 },
+  { beats: 1.5,  abc: '3/2', label: 'Negra puntillo',   penalty: 0.25 },
+  { beats: 2,    abc: '2',   label: 'Blanca',           penalty: 0 },
+  { beats: 3,    abc: '3',   label: 'Blanca puntillo',  penalty: 0.25 },
+  { beats: 4,    abc: '4',   label: 'Redonda',          penalty: 0.1 },
 ];
 
 // Accidentales en ABC: cromático con sostenidos (^ = sostenido, ninguna = natural)
 const ABC_BASE = ['C','^C','D','^D','E','F','^F','G','^G','A','^A','B'];
 
-function inferRhythm(durationMs, bpm) {
-  const beatMs = 60000 / bpm;
-  const beats = durationMs / beatMs;
-  let closest = RHYTHM_VALUES[0];
-  let minDiff = Infinity;
+// Cuantiza en espacio logarítmico (ratios, no diferencias absolutas: la
+// distancia absoluta sesga hacia las figuras largas) + penalización de complejidad.
+function quantizeBeats(beats) {
+  let best = RHYTHM_VALUES[0], bestCost = Infinity;
   for (const rv of RHYTHM_VALUES) {
-    const diff = Math.abs(rv.beats - beats);
-    if (diff < minDiff) { minDiff = diff; closest = rv; }
+    const cost = Math.abs(Math.log2(beats / rv.beats)) + rv.penalty;
+    if (cost < bestCost) { bestCost = cost; best = rv; }
   }
-  return closest;
+  return best;
+}
+
+function inferRhythm(durationMs, bpm) {
+  return quantizeBeats(durationMs / (60000 / bpm));
+}
+
+// Duración rítmica efectiva: intervalo entre ataques (IOI) en vez de duración
+// sonada. Un músico respira o liga menos entre notas y todas quedan "cortas"
+// de forma irregular; el IOI es mucho más estable. Si el hueco hasta la
+// siguiente nota es grande (>35% del IOI) se asume silencio real y se usa la
+// duración sonada.
+function effectiveDurationMs(i) {
+  const n = history[i], next = history[i + 1];
+  if (!next || next.startTime === undefined) return n.durationMs;
+  const ioi = next.startTime - n.startTime;
+  const gap = ioi - n.durationMs;
+  return (gap < ioi * 0.35) ? ioi : n.durationMs;
 }
 
 // Re-infiere figuras con el bpm actual y normaliza por contexto.
 // Se llama tras la grabación y cada vez que el usuario cambia el BPM.
 function recomputeRhythms() {
-  history.forEach((n) => { n.rhythm = inferRhythm(n.durationMs, bpm); });
+  history.forEach((n, i) => {
+    n.effMs  = effectiveDurationMs(i);
+    n.rhythm = quantizeBeats(n.effMs / (60000 / bpm));
+  });
   applyContextNormalization();
 }
 
-// La figura más frecuente "atrae" las notas adyacentes dentro del ±40%
+// La figura más frecuente "atrae" las figuras vecinas dentro del ±30%
 // (corchea tocada un 15% larga → sigue siendo corchea si el contexto lo dice).
 function applyContextNormalization() {
   if (history.length < 3) return;
@@ -330,12 +353,41 @@ function applyContextNormalization() {
   const domBeats  = Number(Object.entries(freq).sort((a, b) => b[1] - a[1])[0][0]);
   const domRhythm = RHYTHM_VALUES.find((rv) => rv.beats === domBeats);
   if (!domRhythm) return;
-  const tolerance = domBeats * 0.4;
-  const beatMs    = 60000 / bpm;
+  const beatMs = 60000 / bpm;
   history.forEach((n) => {
     if (n.rhythm.beats === domBeats) return;
-    if (Math.abs(n.durationMs / beatMs - domBeats) <= tolerance) n.rhythm = domRhythm;
+    // Solo atrae figuras contiguas (p.ej. puntillo ↔ simple), no saltos grandes
+    const ratio = Math.max(n.rhythm.beats, domBeats) / Math.min(n.rhythm.beats, domBeats);
+    if (ratio > 1.6) return;
+    if (Math.abs(n.effMs / beatMs - domBeats) <= domBeats * 0.3) n.rhythm = domRhythm;
   });
+}
+
+// Estimación de tempo por búsqueda de rejilla: elige el BPM que minimiza el
+// error medio de cuantización de todas las duraciones efectivas. Mucho más
+// robusto que "la nota más corta es una corchea". Los dos priors suaves
+// resuelven la ambigüedad de octava (60 vs 120 bpm dan el mismo error de
+// cuantización): se prefiere el tempo donde la figura mediana es una negra,
+// y ligeramente los tempos medios.
+function estimateTempo() {
+  if (history.length < 3) return bpm;
+  const durs = history.map((_, i) => effectiveDurationMs(i));
+  let bestBpm = bpm, bestErr = Infinity;
+  for (let cand = 40; cand <= 200; cand++) {
+    const beatMs = 60000 / cand;
+    let err = 0;
+    for (const d of durs) {
+      const beats = d / beatMs;
+      const q = quantizeBeats(beats);
+      err += Math.abs(Math.log2(beats / q.beats)) + q.penalty;
+    }
+    err /= durs.length;
+    const qb = durs.map((d) => quantizeBeats(d / beatMs).beats).sort((a, b) => a - b);
+    const medBeats = qb[Math.floor(qb.length / 2)];
+    err += Math.abs(Math.log2(medBeats)) * 0.05 + Math.abs(Math.log2(cand / 100)) * 0.02;
+    if (err < bestErr) { bestErr = err; bestBpm = cand; }
+  }
+  return bestBpm;
 }
 
 function midiToAbcPitch(midi) {
@@ -393,14 +445,18 @@ let audioContext, analyser, stream;
 let running = false;
 let history = [];
 
-const NOTE_CONFIRM_FRAMES  = 4;
-const JUMP_CONFIRM_FRAMES  = 8;  // saltos > octava: más frames para filtrar errores de autocorrelación
-const SILENCE_GRACE_FRAMES = 8;
-const MIN_NOTE_DURATION_MS = 150; // < 150 ms se considera ruido/transitorio
+// Umbrales por TIEMPO, no por frames: requestAnimationFrame va de 30 a 120 fps
+// según dispositivo, y con frames los umbrales cambiaban de móvil a móvil.
+const NOTE_CONFIRM_MS      = 60;  // cambio de nota: debe sostenerse 60 ms
+const JUMP_CONFIRM_MS      = 130; // saltos > octava: típicos errores de autocorrelación
+const SILENCE_GRACE_MS     = 120; // silencio sostenido antes de cerrar la nota
+const MIN_NOTE_DURATION_MS = 100; // < 100 ms se considera ruido/transitorio
+const ATTACK_SKIP_MS       = 60;  // el ataque sesga la afinación: se ignora al medir
+const REJOIN_GAP_MS        = 100; // misma nota separada por hueco < 100 ms → microcorte, fusionar
 const SMOOTHING_FACTOR     = 0.2; // suavizado EMA para la visualización en vivo
 
-let displayedMidi = null, candidateMidi = null, candidateCount = 0;
-let silenceFrames = 0, noteStartTime = 0, centsSamples = [];
+let displayedMidi = null, candidateMidi = null, candidateSince = 0;
+let lastVoiceTime = 0, noteStartTime = 0, pitchSamples = [];
 let smoothedCents = 0;
 
 const buf = new Float32Array(2048);
@@ -440,11 +496,9 @@ document.querySelectorAll('.tempBtn').forEach((btn) => {
 bpmPresets.forEach((btn) => btn.addEventListener('click', () => setBpm(Number(btn.dataset.bpm))));
 setBpm(bpm);
 
-// Detección aproximada de tempo: nota más corta ≈ corchea (0.5 beat)
 detectBtn.addEventListener('click', () => {
   if (!history.length) return;
-  const minMs = Math.min(...history.map((n) => n.durationMs));
-  setBpm(Math.round(30000 / minMs)); // 60000ms/bpm * 0.5beats = minMs → bpm = 30000/minMs
+  setBpm(estimateTempo());
 });
 
 // ── Grabación ────────────────────────────────────────────────────────────────
@@ -461,8 +515,8 @@ async function startPractice() {
     audioContext.createMediaStreamSource(stream).connect(analyser);
 
     history = [];
-    displayedMidi = null; candidateMidi = null; candidateCount = 0;
-    silenceFrames = 0; centsSamples = [];
+    displayedMidi = null; candidateMidi = null; candidateSince = 0;
+    lastVoiceTime = performance.now(); pitchSamples = [];
 
     startBtn.hidden = true;
     stopBtn.hidden  = false;
@@ -485,7 +539,8 @@ function stopPractice() {
 
   if (history.length >= 4) removeOutliers();
   mergeConsecutive();
-  recomputeRhythms();
+  if (history.length >= 3) bpm = estimateTempo(); // tempo automático sobre lo grabado
+  setBpm(bpm); // refresca UI y recalcula figuras con el tempo estimado
 
   stopBtn.hidden  = true;
   liveEl.hidden   = true;
@@ -509,10 +564,13 @@ function mergeConsecutive() {
   const merged = [];
   for (const n of history) {
     const last = merged[merged.length - 1];
-    if (last && last.midi === n.midi) {
+    // Solo fusiona si el hueco es un microcorte: dos notas repetidas de verdad
+    // (staccato, mismo tono dos veces) deben quedarse como dos notas.
+    if (last && last.midi === n.midi && n.startTime - last.endTime < REJOIN_GAP_MS) {
       const total = last.durationMs + n.durationMs;
       last.cents      = Math.round((last.cents * last.durationMs + n.cents * n.durationMs) / total);
       last.durationMs = total;
+      last.endTime    = n.endTime;
       last.rhythm     = inferRhythm(total, bpm);
     } else {
       merged.push({ ...n });
@@ -534,63 +592,82 @@ function update() {
   if (!running) return;
   analyser.getFloatTimeDomainData(buf);
   const pitch = autoCorrelate(buf, audioContext.sampleRate);
+  const now = performance.now();
 
   if (pitch > 0) {
-    silenceFrames = 0;
+    lastVoiceTime = now;
     const midi = noteFromPitch(pitch);
     if (displayedMidi === null) {
-      beginNote(midi, pitch);
+      beginNote(midi, pitch, now);
     } else if (midi !== displayedMidi) {
       if (midi === candidateMidi) {
-        candidateCount++;
-        const required = Math.abs(midi - displayedMidi) > 12
-          ? JUMP_CONFIRM_FRAMES : NOTE_CONFIRM_FRAMES;
-        if (candidateCount >= required) { closeCurrentNote(); beginNote(midi, pitch); }
-      } else { candidateMidi = midi; candidateCount = 1; }
+        const requiredMs = Math.abs(midi - displayedMidi) > 12
+          ? JUMP_CONFIRM_MS : NOTE_CONFIRM_MS;
+        if (now - candidateSince >= requiredMs) {
+          // La nueva nota empezó realmente cuando apareció el candidato
+          closeCurrentNote(candidateSince);
+          beginNote(midi, pitch, candidateSince);
+        }
+      } else { candidateMidi = midi; candidateSince = now; }
     } else {
-      candidateCount = 0;
-      centsSamples.push(centsOffFromPitch(pitch, displayedMidi));
+      candidateMidi = null;
+      // Muestra la altura REAL (midi flotante), no solo los cents: la mediana
+      // de estas muestras decide la nota final, robusta frente a la
+      // variabilidad frame a frame.
+      pitchSamples.push({ t: now, m: 12 * Math.log2(pitch / 440) + 69 });
     }
     const rawCents = centsOffFromPitch(pitch, displayedMidi);
     smoothedCents += (rawCents - smoothedCents) * SMOOTHING_FACTOR;
     renderLive(getNoteParts(displayedMidi), pitch, Math.round(smoothedCents));
-  } else if (++silenceFrames > SILENCE_GRACE_FRAMES) {
-    closeCurrentNote();
+  } else if (now - lastVoiceTime > SILENCE_GRACE_MS) {
+    // La nota terminó cuando dejó de sonar, no tras el periodo de gracia
+    closeCurrentNote(lastVoiceTime);
     renderLiveSilence();
   }
   requestAnimationFrame(update);
 }
 
-function beginNote(midi, pitch) {
-  displayedMidi = midi; candidateMidi = null; candidateCount = 0;
-  noteStartTime = performance.now();
+function beginNote(midi, pitch, now) {
+  displayedMidi = midi; candidateMidi = null;
+  noteStartTime = now;
   smoothedCents = centsOffFromPitch(pitch, midi);
-  centsSamples = [centsOffFromPitch(pitch, midi)];
+  pitchSamples = [{ t: now, m: 12 * Math.log2(pitch / 440) + 69 }];
 }
 
-function closeCurrentNote() {
+function closeCurrentNote(endTime = performance.now()) {
   if (displayedMidi === null) return;
-  const durationMs = performance.now() - noteStartTime;
-  if (durationMs >= MIN_NOTE_DURATION_MS && centsSamples.length) {
-    // Mediana en vez de media: ignora los transitorios del ataque/caída que
-    // sesgan la media aunque la nota sea estable.
-    const sorted = [...centsSamples].sort((a, b) => a - b);
+  const durationMs = endTime - noteStartTime;
+  if (durationMs >= MIN_NOTE_DURATION_MS && pitchSamples.length) {
+    // La nota final es la MEDIANA de todas las muestras de pitch, ignorando
+    // el ataque: el primer frame (que antes fijaba la nota) es el más
+    // inestable de todos.
+    let samples = pitchSamples.filter((s) => s.t - noteStartTime >= ATTACK_SKIP_MS);
+    if (samples.length < 3) samples = pitchSamples;
+    const sorted = samples.map((s) => s.m).sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
-    const avgCents = sorted.length % 2 !== 0
+    const medianMidi = sorted.length % 2 !== 0
       ? sorted[mid]
-      : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+      : (sorted[mid - 1] + sorted[mid]) / 2;
+    const midi  = Math.round(medianMidi);
+    const cents = Math.round((medianMidi - midi) * 100);
+
     const last = history[history.length - 1];
-    if (last && last.midi === displayedMidi) {
-      // Misma nota interrumpida por ruido o silencio breve: fusionar
+    if (last && last.midi === midi && noteStartTime - last.endTime < REJOIN_GAP_MS) {
+      // Misma nota interrumpida por un microcorte: fusionar
       const total = last.durationMs + durationMs;
-      last.cents = Math.round((last.cents * last.durationMs + avgCents * durationMs) / total);
+      last.cents = Math.round((last.cents * last.durationMs + cents * durationMs) / total);
       last.durationMs = total;
+      last.endTime = endTime;
       last.rhythm = inferRhythm(total, bpm);
     } else {
-      history.push({ midi: displayedMidi, durationMs, cents: avgCents, rhythm: inferRhythm(durationMs, bpm) });
+      history.push({
+        midi, cents, durationMs,
+        startTime: noteStartTime, endTime,
+        rhythm: inferRhythm(durationMs, bpm),
+      });
     }
   }
-  displayedMidi = null; candidateMidi = null; candidateCount = 0; centsSamples = [];
+  displayedMidi = null; candidateMidi = null; pitchSamples = [];
 }
 
 // ── Render en vivo ───────────────────────────────────────────────────────────
